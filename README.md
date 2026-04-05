@@ -73,7 +73,15 @@ docker-compose up -d
 - [Описание работы API](https://earthquake.usgs.gov/fdsnws/event/1/#methods)
 - [Описание полей из API](https://earthquake.usgs.gov/data/comcat/index.php)
 
-## Диаграмма проекта
+## Data Governance
+
+![](https://barc.com/wp-content/uploads/2024/04/Data-Governance-topics.png)
+
+### 1. Data Architecture
+
+Архитектура проекта построена как многоуровневый пайплайн: `API -> RAW (S3) -> STG -> ODS -> DM -> BI`.
+
+#### Диаграмма проекта
 
 ```mermaid
 flowchart LR
@@ -138,8 +146,93 @@ flowchart LR
     style PostgreSQL color:#1F2A44, font-weight:bold, font-size:15px
 ```
 
+### 2. Data Modeling & Design
+
+В проекте используется слой DM c фактом и измерениями (snowflake-подход), чтобы удобно строить BI-аналитику и переиспользовать измерения.
+
+При этом логика событий остается близкой к `_AS IS_`: зерно факта - одно событие землетрясения (`id`) без историзации SCD.
+
+### 3. Data Storage & Operations
+
+#### Storage
+
+- Cold/Warm storage - MinIO S3 (`raw` слой)
+- Hot storage - PostgreSQL (`stg`, `ods`, `dm`)
+
+#### Compute/Operations
+
+- DuckDB - загрузка из API и работа с Data Lake
+- PostgreSQL - ODS/DM слой и аналитические витрины
+- Apache Airflow - оркестрация DAG-ов и расписание
+
+### 4. Data Security
+
+Безопасность реализуется на уровне:
+
+- пользователей и ключей доступа в MinIO (`access key`/`secret key`),
+- ролевой модели и доступов в PostgreSQL,
+- ролей и подключений в Airflow/Metabase.
+
+При необходимости может быть добавлена интеграция с LDAP/SSO.
+
+### 5. Data Integration & Interoperability
+
+В текущем проекте интеграции с внешними корпоративными системами не реализованы, так как цель - демонстрация полного локального ETL/ELT-контура.
+
+Ключевая совместимость достигается за счет четкого разделения слоев (`stg` -> `ods` -> `dm`) и приведения типов/структуры на этапе ODS.
+
+### 6. Documents & Content
+
+Документация проекта включает:
+
+- основной `README.md`,
+- DDL и SQL-примеры в `sql/schemas/`, `sql/graphic/`, `sql/analytics/`,
+- DAG-код и SQL-трансформации в `dags/`.
+
+### 7. Reference & Master Data
+
+RAW-данные в S3 сохраняются из источника в формате `_as is_` и используются как первичная, неизменяемая основа загрузки.
+
+Изменения и обогащение выполняются на уровнях `ods` и `dm`, где формируется аналитическая модель.
+
+### 8. Data Warehousing & Business Intelligence
+
+Хранилище DWH построено на PostgreSQL, BI-слой реализован в Metabase.
+
+Практические правила для витрин:
+
+1. Регулярно пересматривать актуальность витрин и удалять неиспользуемые.
+2. Управлять доступами к отчетам по ролям пользователей.
+3. Стандартизировать подход к формированию витрин и метрик.
+4. Мониторить нагрузку, производительность и частоту обновлений.
+5. Автоматизировать обновление витрин и минимизировать ручные операции.
+
+### 9. Meta-data
+
+Метаданные частично заданы через структуру DWH и документацию запросов.
+
+Дополнительно можно развивать каталог метаданных:
+
+- комментарии к таблицам/колонкам в PostgreSQL,
+- дата-каталог (например, OpenMetadata или DataHub).
+
+Полезный внешний словарь полей источника:
+
+- [Описание полей из API](https://earthquake.usgs.gov/data/comcat/index.php)
+
+### 10. Data Quality
+
+В проекте реализованы базовые проверки качества данных:
+
+- сверка количества записей между `ods.earthquakes` и `dm.fact_earthquakes`,
+- контроль отсутствующих событий в факте,
+- контроль `NULL` во внешних ключах факта.
+
+Примеры запросов для Data Quality находятся в `sql/analytics/01_data_quality_checks.sql`.
+
 ## SQL-файлы
 
 - DDL схем и таблиц: `sql/schemas/01_create_schemas_and_tables.sql`
 - SQL для визуализаций в Metabase: `sql/graphic/`
 - Примеры аналитических SQL-запросов: `sql/analytics/`
+- SQL-проверки качества данных: `sql/data_quality/`
