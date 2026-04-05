@@ -68,6 +68,17 @@ docker-compose up -d
 
 Значения пользователя и пароля берутся из `docker-compose.yaml` (сервис `postgres_dwh`).
 
+## Run DAG chain
+
+Для полного прогона пайплайна в Airflow запусти DAG-и в следующем порядке:
+
+1. `raw_from_api_to_s3` - забирает данные из USGS API и кладет parquet в MinIO (`raw` слой).
+2. `raw_from_s3_to_stg` - загружает данные из MinIO в `stg.earthquake_raw`.
+3. `stg_to_ods_earthquake` - приводит типы и выполняет upsert в `ods.earthquakes`.
+4. `ods_to_dm_earthquake` - обновляет `dm.dim_*` и `dm.fact_earthquakes`.
+
+Примечание: в проекте настроены триггеры между DAG-ами, поэтому обычно достаточно запустить первый DAG (`raw_from_api_to_s3`), а остальные запустятся по цепочке.
+
 ## Источники
 
 - [Описание работы API](https://earthquake.usgs.gov/fdsnws/event/1/#methods)
