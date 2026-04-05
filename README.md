@@ -142,3 +142,4 @@ flowchart LR
 
 - DDL схем и таблиц: `sql/schemas/01_create_schemas_and_tables.sql`
 - SQL для визуализаций в Metabase: `sql/graphic/`
+- Примеры аналитических SQL-запросов: `sql/analytics/`
