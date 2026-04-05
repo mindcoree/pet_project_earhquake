@@ -14,36 +14,15 @@ args = {
     "retry_delay": pendulum.duration(minutes=5),
 }
 
-# ── Sub-dimensions ────────────────────────────────────────────────────────────
+# ── Dimensions ────────────────────────────────────────────────────────────────
 
 SQL_DIM_REGION = """
 INSERT INTO dm.dim_region (region_name)
-SELECT DISTINCT region
+SELECT DISTINCT COALESCE(NULLIF(TRIM(region), ''), 'unknown') AS region_name
 FROM ods.earthquakes
 WHERE CAST(event_time AS DATE) = '{{ ds }}'
-  AND region IS NOT NULL
 ON CONFLICT (region_name) DO NOTHING;
 """
-
-SQL_DIM_MAG_SOURCE = """
-INSERT INTO dm.dim_mag_source (mag_source)
-SELECT DISTINCT mag_source
-FROM ods.earthquakes
-WHERE CAST(event_time AS DATE) = '{{ ds }}'
-  AND mag_source IS NOT NULL
-ON CONFLICT (mag_source) DO NOTHING;
-"""
-
-SQL_DIM_LOCATION_SOURCE = """
-INSERT INTO dm.dim_location_source (location_source)
-SELECT DISTINCT location_source
-FROM ods.earthquakes
-WHERE CAST(event_time AS DATE) = '{{ ds }}'
-  AND location_source IS NOT NULL
-ON CONFLICT (location_source) DO NOTHING;
-"""
-
-# ── Dimensions ────────────────────────────────────────────────────────────────
 
 SQL_DIM_TIME = """
 INSERT INTO dm.dim_time (
@@ -69,52 +48,47 @@ SELECT DISTINCT
     r.region_id,
     e.latitude,
     e.longitude,
-    e.place
+    COALESCE(NULLIF(TRIM(e.place), ''), 'unknown') AS place
 FROM ods.earthquakes e
-LEFT JOIN dm.dim_region r ON r.region_name = e.region
+LEFT JOIN dm.dim_region r
+       ON r.region_name = COALESCE(NULLIF(TRIM(e.region), ''), 'unknown')
 WHERE CAST(e.event_time AS DATE) = '{{ ds }}'
 ON CONFLICT (latitude, longitude, place) DO NOTHING;
 """
 
 SQL_DIM_MAGNITUDE = """
-INSERT INTO dm.dim_magnitude (mag_source_id, mag_type)
+INSERT INTO dm.dim_magnitude (mag_type, mag_source)
 SELECT DISTINCT
-    ms.mag_source_id,
-    e.mag_type
+    COALESCE(NULLIF(TRIM(e.mag_type), ''), 'unknown') AS mag_type,
+    COALESCE(NULLIF(TRIM(e.mag_source), ''), 'unknown') AS mag_source
 FROM ods.earthquakes e
-LEFT JOIN dm.dim_mag_source ms ON ms.mag_source = e.mag_source
 WHERE CAST(e.event_time AS DATE) = '{{ ds }}'
-  AND e.mag_type IS NOT NULL
-ON CONFLICT (mag_type) DO NOTHING;
+ON CONFLICT (mag_type, mag_source) DO NOTHING;
 """
 
 SQL_DIM_NETWORK = """
-INSERT INTO dm.dim_network (loc_source_id, net)
+INSERT INTO dm.dim_network (net, location_source)
 SELECT DISTINCT
-    ls.loc_source_id,
-    e.net
+    COALESCE(NULLIF(TRIM(e.net), ''), 'unknown') AS net,
+    COALESCE(NULLIF(TRIM(e.location_source), ''), 'unknown') AS location_source
 FROM ods.earthquakes e
-LEFT JOIN dm.dim_location_source ls ON ls.location_source = e.location_source
 WHERE CAST(e.event_time AS DATE) = '{{ ds }}'
-  AND e.net IS NOT NULL
-ON CONFLICT (net) DO NOTHING;
+ON CONFLICT (net, location_source) DO NOTHING;
 """
 
 SQL_DIM_STATUS = """
 INSERT INTO dm.dim_status (status)
-SELECT DISTINCT status
+SELECT DISTINCT COALESCE(NULLIF(TRIM(status), ''), 'unknown') AS status
 FROM ods.earthquakes
 WHERE CAST(event_time AS DATE) = '{{ ds }}'
-  AND status IS NOT NULL
 ON CONFLICT (status) DO NOTHING;
 """
 
 SQL_DIM_EVENT_TYPE = """
 INSERT INTO dm.dim_event_type (event_type)
-SELECT DISTINCT event_type
+SELECT DISTINCT COALESCE(NULLIF(TRIM(event_type), ''), 'unknown') AS event_type
 FROM ods.earthquakes
 WHERE CAST(event_time AS DATE) = '{{ ds }}'
-  AND event_type IS NOT NULL
 ON CONFLICT (event_type) DO NOTHING;
 """
 
@@ -160,19 +134,33 @@ SELECT
     e.mag_nst
 FROM ods.earthquakes e
 LEFT JOIN dm.dim_time         t  ON t.event_time                                    = e.event_time
-LEFT JOIN dm.dim_location     l  ON l.latitude = e.latitude
-                                AND l.longitude = e.longitude
-                                AND l.place = e.place
-LEFT JOIN dm.dim_magnitude    m  ON m.mag_type                                      = e.mag_type
-LEFT JOIN dm.dim_network      n  ON n.net                                           = e.net
-LEFT JOIN dm.dim_status       s  ON s.status                                        = e.status
-LEFT JOIN dm.dim_event_type   et ON et.event_type                                   = e.event_type
+LEFT JOIN dm.dim_location     l  ON l.latitude IS NOT DISTINCT FROM e.latitude
+                                AND l.longitude IS NOT DISTINCT FROM e.longitude
+                                AND l.place = COALESCE(NULLIF(TRIM(e.place), ''), 'unknown')
+LEFT JOIN dm.dim_magnitude    m  ON m.mag_type                                      = COALESCE(NULLIF(TRIM(e.mag_type), ''), 'unknown')
+                                AND m.mag_source                                    = COALESCE(NULLIF(TRIM(e.mag_source), ''), 'unknown')
+LEFT JOIN dm.dim_network      n  ON n.net                                           = COALESCE(NULLIF(TRIM(e.net), ''), 'unknown')
+                                AND n.location_source                               = COALESCE(NULLIF(TRIM(e.location_source), ''), 'unknown')
+LEFT JOIN dm.dim_status       s  ON s.status                                        = COALESCE(NULLIF(TRIM(e.status), ''), 'unknown')
+LEFT JOIN dm.dim_event_type   et ON et.event_type                                   = COALESCE(NULLIF(TRIM(e.event_type), ''), 'unknown')
 WHERE CAST(e.event_time AS DATE) = '{{ ds }}'
 ON CONFLICT (id) DO UPDATE SET
     time_id       = EXCLUDED.time_id,
     location_id   = EXCLUDED.location_id,
+    mag_type_id   = EXCLUDED.mag_type_id,
+    network_id    = EXCLUDED.network_id,
     mag           = EXCLUDED.mag,
+    depth         = EXCLUDED.depth,
+    nst           = EXCLUDED.nst,
+    gap           = EXCLUDED.gap,
+    dmin          = EXCLUDED.dmin,
+    rms           = EXCLUDED.rms,
+    horizontal_error = EXCLUDED.horizontal_error,
+    depth_error      = EXCLUDED.depth_error,
+    mag_error        = EXCLUDED.mag_error,
+    mag_nst          = EXCLUDED.mag_nst,
     status_id     = EXCLUDED.status_id,
+    event_type_id = EXCLUDED.event_type_id,
     dwh_loaded_at = NOW();
 """
 
@@ -190,24 +178,14 @@ with DAG(
     start = EmptyOperator(task_id="start")
     end   = EmptyOperator(task_id="end")
 
-    # Sub-dimensions — параллельно, ни от чего не зависят
+    # Dimensions
     load_dim_region = SQLExecuteQueryOperator(
         task_id="load_dim_region",
         conn_id="postgres_dwh",
         sql=SQL_DIM_REGION,
     )
-    load_dim_mag_source = SQLExecuteQueryOperator(
-        task_id="load_dim_mag_source",
-        conn_id="postgres_dwh",
-        sql=SQL_DIM_MAG_SOURCE,
-    )
-    load_dim_location_source = SQLExecuteQueryOperator(
-        task_id="load_dim_location_source",
-        conn_id="postgres_dwh",
-        sql=SQL_DIM_LOCATION_SOURCE,
-    )
 
-    # Dimensions — параллельно, но после sub-dimensions
+    # Dimensions — часть выполняется параллельно
     load_dim_time = SQLExecuteQueryOperator(
         task_id="load_dim_time",
         conn_id="postgres_dwh",
@@ -245,36 +223,22 @@ with DAG(
         conn_id="postgres_dwh",
         sql=SQL_FACT,
     )
-    
+
 
     # ── Dependencies ──────────────────────────────────────────────────────────
-    #
-    #  start
-    #    ├── load_dim_region ──────────────────────┐
-    #    ├── load_dim_mag_source ──────────────────┤
-    #    └── load_dim_location_source ─────────────┤
-    #                                              ▼
-    #                              ┌── load_dim_time
-    #                              ├── load_dim_location    (нужен dim_region)
-    #                              ├── load_dim_magnitude   (нужен dim_mag_source)
-    #                              ├── load_dim_network     (нужен dim_location_source)
-    #                              ├── load_dim_status
-    #                              └── load_dim_event_type
-    #                                              │
-    #                                              ▼
-    #                                       load_fact
-    #                                              │
-    #                                             end
+    base_dims = [
+        load_dim_time,
+        load_dim_magnitude,
+        load_dim_network,
+        load_dim_status,
+        load_dim_event_type,
+    ]
 
-    sub_dims = [load_dim_region, load_dim_mag_source, load_dim_location_source]
-    dims     = [load_dim_time, load_dim_location, load_dim_magnitude,
-                load_dim_network, load_dim_status, load_dim_event_type]
- 
-    start >> sub_dims # type: ignore
-    for sub in sub_dims:
-        sub >> dims # type: ignore
-    for dim in dims:
+    start >> load_dim_region # type: ignore
+    start >> base_dims # type: ignore
+    load_dim_region >> load_dim_location # type: ignore
+
+    all_dims = [load_dim_region, load_dim_location, *base_dims]
+    for dim in all_dims:
         dim >> load_fact # type: ignore
     load_fact >> end # type: ignore
-
-
