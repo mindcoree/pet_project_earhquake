@@ -1,26 +1,20 @@
 import logging
+
 import duckdb
 import pendulum
 from airflow import DAG
 from airflow.models import Variable
 from airflow.operators.empty import EmptyOperator
 from airflow.operators.python import PythonOperator
-from airflow.sensors.external_task import ExternalTaskSensor
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
-# Конфигурация DAG
 OWNER = "mindcore"
-DAG_ID = "raw_from_s3_to_stg"  # Изменил на STG
+DAG_ID = "raw_from_s3_to_stg"
 
-# Используемые таблицы
 LAYER = "raw"
 SOURCE = "earthquake"
-SCHEMA = "stg"          # Изменил на STG (staging)
+SCHEMA = "stg"
 TARGET_TABLE = "earthquake_raw"
-
-# S3 & DB Credentials
-ACCESS_KEY = Variable.get("access_key")
-SECRET_KEY = Variable.get("secret_key")
-PASSWORD = Variable.get("pg_password")
 
 args = {
     "owner": OWNER,
@@ -32,47 +26,48 @@ args = {
     "retry_delay": pendulum.duration(minutes=10),
 }
 
+
 def get_and_transfer_raw_data_to_stg_pg(**context):
-    """Fetch data from S3 and store in PostgreSQL Staging layer."""
-    
-    # Получаем дату выполнения для формирования пути к файлу
+    """Fetch data from S3 and upsert into PostgreSQL Staging layer."""
+
     logical_date = context["data_interval_start"].format("YYYY-MM-DD")
     logging.info(f"Processing date: {logical_date}")
-    
+
+    #  Читаем credentials внутри функции
+    access_key = Variable.get("access_key")
+    secret_key = Variable.get("secret_key")
+    password = Variable.get("pg_password")
+
     con = duckdb.connect()
 
     try:
-        con.sql(f"""
-            -- Установка необходимых расширений
-            INSTALL httpfs;
-            INSTALL postgres;
-            LOAD httpfs;
-            LOAD postgres;
+        #  LOAD вместо INSTALL — расширения уже установлены в контейнере,
+        #    INSTALL каждый раз лезет в сеть и тормозит выполнение
+        con.sql("LOAD httpfs;")
+        con.sql("LOAD postgres;")
 
-            -- Конфигурация S3
-            SET s3_url_style = 'path';
-            SET s3_endpoint = 'minio:9000';
-            SET s3_access_key_id = '{ACCESS_KEY}';
-            SET s3_secret_access_key = '{SECRET_KEY}';
-            SET s3_use_ssl = FALSE;
+        con.sql("SET s3_url_style = 'path';")
+        con.sql("SET s3_endpoint = 'minio:9000';")
+        con.sql("SET s3_use_ssl = FALSE;")
+        con.sql(f"SET s3_access_key_id = '{access_key}';")
+        con.sql(f"SET s3_secret_access_key = '{secret_key}';")
 
-            -- Подключение к Postgres
-            ATTACH 'host=postgres_dwh port=5432 dbname=postgres user=postgres password={PASSWORD}' 
-            AS dwh_db (TYPE POSTGRES);
+        pg_conn_str = (
+            f"host=postgres_dwh port=5432 dbname=postgres "
+            f"user=postgres password={password}"
+        )
+        con.sql(f"ATTACH '{pg_conn_str}' AS dwh_db (TYPE POSTGRES);")
 
-            -- Очистка данных за текущую дату, чтобы избежать дублей при перезапуске
-            -- Предполагаем, что в STG есть колонка загрузки или фильтруем по ID
-            -- Для простоты здесь просто вставка, но в идеале: 
-            -- DELETE FROM dwh_db.{SCHEMA}.{TARGET_TABLE} WHERE date_part = '{logical_date}';
-
-            INSERT INTO dwh_db.{SCHEMA}.{TARGET_TABLE} BY NAME
+        parquet_path = f"s3://prod/{LAYER}/{SOURCE}/{logical_date}/*.parquet"
+        source_data = con.sql(
+            f"""
             SELECT
                 time,
                 latitude,
                 longitude,
                 depth,
                 mag,
-                magType AS mag_type,
+                magType         AS mag_type,
                 nst,
                 gap,
                 dmin,
@@ -83,48 +78,74 @@ def get_and_transfer_raw_data_to_stg_pg(**context):
                 place,
                 type,
                 horizontalError AS horizontal_error,
-                depthError AS depth_error,
-                magError AS mag_error,
-                magNst AS mag_nst,
+                depthError      AS depth_error,
+                magError        AS mag_error,
+                magNst          AS mag_nst,
                 status,
-                locationSource AS location_source,
-                magSource AS mag_source
-            FROM read_parquet('s3://prod/{LAYER}/{SOURCE}/{logical_date}/*.parquet');
-        """)
-        logging.info(f"Data for {logical_date} successfully moved to STG")
+                locationSource  AS location_source,
+                magSource       AS mag_source
+            FROM read_parquet('{parquet_path}')
+        """
+        )
+
+        row_count = source_data.count("id").fetchone()[0]  # type: ignore
+        logging.info(f"Rows read from S3: {row_count}")
+
+        if row_count == 0:
+            logging.warning(f"No data found in S3 for {logical_date}, skipping insert.")
+            return
+
+        #  DELETE + INSERT — идемпотентный upsert
+        #    ON CONFLICT не поддерживается DuckDB postgres extension
+        logging.info(f"Deleting existing rows for {logical_date}...")
+        con.sql(
+            f"""
+            DELETE FROM dwh_db.{SCHEMA}.{TARGET_TABLE}
+            WHERE CAST(time AS DATE) = '{logical_date}'
+        """
+        )
+
+        logging.info("Inserting fresh data...")
+        con.sql(
+            f"""
+            INSERT INTO dwh_db.{SCHEMA}.{TARGET_TABLE} BY NAME
+            SELECT * FROM source_data
+        """
+        )
+
+        logging.info(f"Successfully upserted {row_count} rows for {logical_date}.")
+
     except Exception as e:
-        logging.error(f"Error during transfer: {e}")
+        logging.error(f"Error during transfer for {logical_date}: {e}")
         raise
     finally:
         con.close()
 
+
 with DAG(
     dag_id=DAG_ID,
-    schedule_interval="0 5 * * *",
+    schedule=None,  #  schedule вместо schedule_interval
     default_args=args,
     tags=["s3", "stg", "pg"],
-    catchup=True,
     max_active_runs=1,
 ) as dag:
 
     start = EmptyOperator(task_id="start")
-
-    # Сенсор ждет успешного завершения DAG, который качает данные из API в S3
-    sensor_on_raw_layer = ExternalTaskSensor(
-        task_id="sensor_on_raw_layer",
-        external_dag_id="raw_from_api_to_s3",
-        allowed_states=["success"],
-        mode="reschedule",
-        timeout=3600,
-        poke_interval=60,
-    )
 
     transfer_task = PythonOperator(
         task_id="transfer_s3_to_stg",
         python_callable=get_and_transfer_raw_data_to_stg_pg,
     )
 
+    trigger_ods = TriggerDagRunOperator(
+        task_id="trigger_ods_layer",
+        trigger_dag_id="stg_to_ods_earthquake",
+        logical_date="{{ data_interval_start }}",  #  logical_date вместо execution_date
+        reset_dag_run=True,
+        wait_for_completion=False,
+        poke_interval=30,
+    )
+
     end = EmptyOperator(task_id="end")
 
-    start >> sensor_on_raw_layer >> transfer_task >> end # type: ignore
-    
+    start >> transfer_task >> trigger_ods >> end  # type: ignore
