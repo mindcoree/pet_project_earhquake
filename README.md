@@ -75,15 +75,15 @@ flowchart LR
         S3["MinIO S3<br/>s3://prod/raw/earthquake/..."]
     end
 
-    subgraph DWH
+    subgraph DWH ["DWH"]
         direction LR
-        subgraph PostgreSQL
+        subgraph PostgreSQL ["PostgreSQL"]
             direction LR
-            subgraph model
+            subgraph model ["Data Model"]
                 direction LR
                 stg["STG Layer<br/>stg.earthquake_raw"]
                 ods["ODS Layer<br/>ods.earthquakes"]
-                dm["Data Mart Layer<br/>dm.fact_earthquakes + dm.dim_*"]
+                dm["Data Mart Layer<br/>Snowflake"]
             end
         end
     end
@@ -104,191 +104,24 @@ flowchart LR
     AirFlow -->|"8. Load Data to DM"| dm
     dm -->|"9. Visualize Data"| MetaBase
 
-    %% Styling
-    style API fill:#FFD1DC,stroke:#000000,stroke-width:2px
-    style ETL fill:#D9E5E4,stroke:#000000,stroke-width:2px
-    style Storage fill:#FFF2CC,stroke:#000000,stroke-width:2px
-    style DWH fill:#C9DAF7,stroke:#000000,stroke-width:2px
-    style PostgreSQL fill:#E2F0CB,stroke:#000000,stroke-width:2px
-    style BI fill:#B69CFA,stroke:#000000,stroke-width:2px
+    %% Enhanced Styling for better visibility
+    style API fill:#FFD1DC, stroke:#1F2A44, stroke-width:3px
+    style ETL fill:#D9E5E4, stroke:#1F2A44, stroke-width:3px
+    style Storage fill:#FFF2CC, stroke:#1F2A44, stroke-width:3px
+    style DWH fill:#C9DAF7, stroke:#1F2A44, stroke-width:5px
+    style PostgreSQL fill:#E2F0CB, stroke:#1F2A44, stroke-width:4px
+    style BI fill:#B69CFA, stroke:#1F2A44, stroke-width:3px
 
-    classDef layer fill:#ffffff,stroke:#333,stroke-width:2px,rx:6,ry:6
+    %% STG / ODS / DM — максимально читаемые
+    classDef layer fill:#FFFFFF, stroke:#1F2A44, stroke-width:3px, rx:10, ry:10, font-size:15px, color:#1F2A44, font-weight:600
     class stg,ods,dm layer
+
+    %% Subgraph titles
+    style DWH color:#1F2A44, font-weight:bold, font-size:16px
+    style PostgreSQL color:#1F2A44, font-weight:bold, font-size:15px
 ```
 
-## SQL схемы и таблицы
+## SQL-файлы
 
-Ниже приведен DDL для текущей модели данных (`stg` -> `ods` -> `dm`).
-
-DDL схем:
-
-```sql
-CREATE SCHEMA ods;
-CREATE SCHEMA dm;
-CREATE SCHEMA stg;
-```
-
-DDL `stg.earthquake_raw`:
-
-```sql
-CREATE TABLE stg.earthquake_raw
-(
-    loaded_at         timestamp default now(),
-    time              text,
-    latitude          text,
-    longitude         text,
-    depth             text,
-    mag               text,
-    mag_type          text,
-    nst               text,
-    gap               text,
-    dmin              text,
-    rms               text,
-    net               text,
-    id                text,
-    updated           text,
-    place             text,
-    type              text,
-    horizontal_error  text,
-    depth_error       text,
-    mag_error         text,
-    mag_nst           text,
-    status            text,
-    location_source   text,
-    mag_source        text
-);
-```
-
-DDL `ods.earthquakes`:
-
-```sql
-CREATE TABLE ods.earthquakes (
-    id                VARCHAR(50) PRIMARY KEY,
-    event_time        TIMESTAMP WITH TIME ZONE,
-    updated_at        TIMESTAMP WITH TIME ZONE,
-    latitude          NUMERIC(12, 8),
-    longitude         NUMERIC(12, 8),
-    depth             NUMERIC(10, 4),
-    mag               NUMERIC(5, 2),
-    mag_type          VARCHAR(20),
-    nst               INTEGER,
-    gap               NUMERIC(6, 2),
-    dmin              NUMERIC(8, 4),
-    rms               NUMERIC(6, 3),
-    horizontal_error  NUMERIC(10, 5),
-    depth_error       NUMERIC(10, 5),
-    mag_error         NUMERIC(10, 5),
-    mag_nst           INTEGER,
-    net               VARCHAR(10),
-    place             TEXT,
-    event_type        VARCHAR(50),
-    status            VARCHAR(20),
-    location_source   VARCHAR(10),
-    mag_source        VARCHAR(10),
-    region            TEXT,
-    ods_loaded_at     TIMESTAMP DEFAULT NOW()
-);
-```
-
-DDL `dm.dim_region`:
-
-```sql
-CREATE TABLE dm.dim_region (
-    region_id     SERIAL PRIMARY KEY,
-    region_name   TEXT NOT NULL UNIQUE
-);
-```
-
-DDL `dm.dim_time`:
-
-```sql
-CREATE TABLE dm.dim_time (
-    time_id      SERIAL PRIMARY KEY,
-    event_time   TIMESTAMPTZ NOT NULL UNIQUE,
-    year         INT,
-    month        INT,
-    day          INT,
-    hour         INT,
-    quarter      INT,
-    day_of_week  VARCHAR(10),
-    is_weekend   BOOLEAN
-);
-```
-
-DDL `dm.dim_location`:
-
-```sql
-CREATE TABLE dm.dim_location (
-    location_id  SERIAL PRIMARY KEY,
-    region_id    INT REFERENCES dm.dim_region(region_id),
-    latitude     NUMERIC(12,8),
-    longitude    NUMERIC(12,8),
-    place        TEXT,
-    UNIQUE(latitude, longitude, place)
-);
-```
-
-DDL `dm.dim_magnitude`:
-
-```sql
-CREATE TABLE dm.dim_magnitude (
-    mag_type_id   SERIAL PRIMARY KEY,
-    mag_type      VARCHAR(20) NOT NULL,
-    mag_source    VARCHAR(10) NOT NULL,
-    UNIQUE (mag_type, mag_source)
-);
-```
-
-DDL `dm.dim_network`:
-
-```sql
-CREATE TABLE dm.dim_network (
-    network_id       SERIAL PRIMARY KEY,
-    net              VARCHAR(10) NOT NULL,
-    location_source  VARCHAR(10) NOT NULL,
-    UNIQUE (net, location_source)
-);
-```
-
-DDL `dm.dim_status`:
-
-```sql
-CREATE TABLE dm.dim_status (
-    status_id  SERIAL PRIMARY KEY,
-    status     VARCHAR(20) NOT NULL UNIQUE
-);
-```
-
-DDL `dm.dim_event_type`:
-
-```sql
-CREATE TABLE dm.dim_event_type (
-    event_type_id  SERIAL PRIMARY KEY,
-    event_type     VARCHAR(50) NOT NULL UNIQUE
-);
-```
-
-DDL `dm.fact_earthquakes`:
-
-```sql
-CREATE TABLE dm.fact_earthquakes (
-    id               VARCHAR(50) PRIMARY KEY,
-    time_id          INT REFERENCES dm.dim_time(time_id),
-    location_id      INT REFERENCES dm.dim_location(location_id),
-    mag_type_id      INT REFERENCES dm.dim_magnitude(mag_type_id),
-    network_id       INT REFERENCES dm.dim_network(network_id),
-    status_id        INT REFERENCES dm.dim_status(status_id),
-    event_type_id    INT REFERENCES dm.dim_event_type(event_type_id),
-    mag              NUMERIC(5,2),
-    depth            NUMERIC(10,4),
-    nst              INT,
-    gap              NUMERIC(6,2),
-    dmin             NUMERIC(8,4),
-    rms              NUMERIC(6,3),
-    horizontal_error NUMERIC(10,5),
-    depth_error      NUMERIC(10,5),
-    mag_error        NUMERIC(10,5),
-    mag_nst          INT,
-    dwh_loaded_at    TIMESTAMP DEFAULT NOW()
-);
-```
+- DDL схем и таблиц: `sql/schemas/01_create_schemas_and_tables.sql`
+- SQL для визуализаций в Metabase: `sql/graphic/`
