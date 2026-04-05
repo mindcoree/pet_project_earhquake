@@ -6,16 +6,13 @@ from airflow import DAG
 from airflow.models import Variable
 from airflow.operators.python import PythonOperator
 from airflow.operators.empty import EmptyOperator
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 OWNER = "mindcore"
 DAG_ID = "raw_from_api_to_s3"
 
 LAYER = "raw"
 SOURCE = "earthquake"
-
-# S3 credentials
-ACCESS_KEY = Variable.get("access_key")
-SECRET_KEY = Variable.get("secret_key")
 
 LONG_DESCRIPTION = """
 This DAG is responsible for fetching data from the earthquake API and storing it in S3.
@@ -36,10 +33,8 @@ args = {
 
 def get_dates(**context) -> tuple[str, str]:
     """Get the start and end dates for the API query based on the DAG's execution context."""
-
     start_date = context["data_interval_start"].format("YYYY-MM-DD")
     end_date = context["data_interval_end"].format("YYYY-MM-DD")
-
     return start_date, end_date
 
 
@@ -48,55 +43,73 @@ def get_and_transfer_api_data_to_s3(**context):
 
     start_date, end_date = get_dates(**context)
     logging.info(f"Start load for dates: {start_date}/{end_date}")
+
+    #  Читаем credentials внутри функции — не попадают в логи планировщика
+    access_key = Variable.get("access_key")
+    secret_key = Variable.get("secret_key")
+
     con = duckdb.connect()
 
-    con.sql(
-        f"""
-        SET TIMEZONE='UTC';
-        INSTALL httpfs;
-        LOAD httpfs;
-        SET s3_url_style = 'path';
-        SET s3_endpoint = 'minio:9000';
-        SET s3_access_key_id = '{ACCESS_KEY}';
-        SET s3_secret_access_key = '{SECRET_KEY}';
-        SET s3_use_ssl = FALSE;
+    try:
+        #  Разделяем на отдельные вызовы для удобства дебага
+        con.sql("LOAD httpfs;")
 
-        COPY
-        (
-            SELECT
-                *
-            FROM
-                read_csv_auto('https://earthquake.usgs.gov/fdsnws/event/1/query?format=csv&starttime={start_date}&endtime={end_date}') AS res
-        ) TO 's3://prod/{LAYER}/{SOURCE}/{start_date}/{start_date}_00-00-00.gz.parquet';
+        con.sql("SET TIMEZONE = 'UTC';")
+        con.sql("SET s3_url_style = 'path';")
+        con.sql("SET s3_endpoint = 'minio:9000';")
+        con.sql("SET s3_use_ssl = FALSE;")
+        con.sql(f"SET s3_access_key_id = '{access_key}';")
+        con.sql(f"SET s3_secret_access_key = '{secret_key}';")
 
-        """,
-    )
+        api_url = (
+            f"https://earthquake.usgs.gov/fdsnws/event/1/query"
+            f"?format=csv&starttime={start_date}&endtime={end_date}"
+        )
+        s3_path = (
+            f"s3://prod/{LAYER}/{SOURCE}/{start_date}/{start_date}_00-00-00.gz.parquet"
+        )
 
-    con.close()
-    logging.info(f"Download for date success: {start_date}")
+        con.sql(
+            f"""
+            COPY (
+                SELECT * FROM read_csv_auto('{api_url}')
+            ) TO '{s3_path}';
+        """
+        )
+
+        logging.info(f"Download for date success: {start_date}")
+
+    except Exception as e:
+        logging.error(f"Error during transfer for {start_date}: {e}")
+        raise
+    finally:
+        con.close()
 
 
 with DAG(
     dag_id=DAG_ID,
-    schedule_interval="0 5 * * *",
+    schedule="0 5 * * *",  #  schedule вместо schedule_interval
     default_args=args,
     tags=["s3", "raw"],
-    description=SHORT_DESCRIPTION,
-    concurrency=1,
-    max_active_tasks=1,
     max_active_runs=1,
 ) as dag:
 
-    dag.doc_md = LONG_DESCRIPTION
-
     start = EmptyOperator(task_id="start")
 
-    get_and_transfer_api_data_to_s3 = PythonOperator(
+    transfer_api_to_s3 = PythonOperator(
         task_id="get_and_transfer_api_data_to_s3",
         python_callable=get_and_transfer_api_data_to_s3,
-    )  # type: ignore
+    )
+
+    trigger_stg = TriggerDagRunOperator(
+        task_id="trigger_stg_layer",
+        trigger_dag_id="raw_from_s3_to_stg",
+        logical_date="{{ data_interval_start }}",  #  logical_date вместо execution_date
+        reset_dag_run=True,
+        wait_for_completion=False,
+        poke_interval=30,
+    )
 
     end = EmptyOperator(task_id="end")
 
-    start >> get_and_transfer_api_data_to_s3 >> end  # type: ignore
-
+    start >> transfer_api_to_s3 >> trigger_stg >> end  # type: ignore
