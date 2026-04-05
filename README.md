@@ -23,7 +23,7 @@ pip install -r requirements.txt
 docker-compose up -d
 ```
 
-## Предварительная настройка MinIO and PostgreSQL в Airflow
+## Предварительная настройка MinIO and PostgreSQL для Airflow
 
 После старта контейнеров необходимо настроить доступы, которые используются DAG-ами.
 
